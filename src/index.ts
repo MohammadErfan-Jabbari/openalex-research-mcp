@@ -657,7 +657,7 @@ const tools: Tool[] = [
         },
         sort: {
           type: 'string',
-          description: 'Sort: relevance_score (default), cited_by_count:desc, publication_year:desc',
+          description: 'Sort: relevance_score:desc (default), cited_by_count:desc, publication_year:desc',
         },
         page: {
           type: 'number',
@@ -748,7 +748,7 @@ const tools: Tool[] = [
         },
         sort: {
           type: 'string',
-          description: 'Sort by: cited_by_count:desc, publication_year:desc, relevance_score (default)',
+          description: 'Sort by: cited_by_count:desc, publication_year:desc, relevance_score:desc (default)',
         },
         per_page: {
           type: 'number',
@@ -1211,7 +1211,7 @@ const tools: Tool[] = [
         },
         sort: {
           type: 'string',
-          description: 'Sort: cited_by_count:desc (default), publication_year:desc, relevance_score',
+          description: 'Sort: cited_by_count:desc (default), publication_year:desc, relevance_score:desc',
         },
         per_page: { type: 'number', description: 'Results per page (default: 10, use 20 for broader coverage, max: 200)' },
       },
@@ -1249,7 +1249,7 @@ const tools: Tool[] = [
         min_citations: { type: 'number', description: 'Minimum citation count' },
         sort: {
           type: 'string',
-          description: 'Sort: cited_by_count:desc (default for credibility), publication_year:desc, relevance_score',
+          description: 'Sort: cited_by_count:desc (default for credibility), publication_year:desc, relevance_score:desc',
         },
         per_page: { type: 'number', description: 'Results per page (default: 10, use 20 for broader coverage, max 200)' },
       },
@@ -1474,8 +1474,82 @@ const server = new Server(
   }
 );
 
+const SOURCE_NAME_RESOLUTION_CACHE = new Map<string, string[]>();
+
+function normalizeSourceName(sourceName: string): string {
+  return sourceName.trim().toLowerCase();
+}
+
+async function resolveSourceIdsByName(sourceName: string, perPage = 10): Promise<string[]> {
+  const normalized = normalizeSourceName(sourceName);
+  const cached = SOURCE_NAME_RESOLUTION_CACHE.get(normalized);
+  if (cached) {
+    return cached;
+  }
+
+  const sourceResults = await openAlexClient.getSources({
+    search: sourceName,
+    perPage: Math.max(perPage, 10),
+    sort: 'works_count:desc',
+  });
+
+  const candidates = (sourceResults.results || [])
+    .map((source: any) => ({
+      id: source?.id as string | undefined,
+      displayName: (source?.display_name || '').toString(),
+      type: (source?.type || '').toString().toLowerCase(),
+      worksCount: Number(source?.works_count || 0),
+    }))
+    .filter((source: any) => Boolean(source.id));
+
+  const preferredTypes = new Set(['conference', 'journal', 'book series']);
+  const exactMatches = candidates.filter(
+    (source: any) => normalizeSourceName(source.displayName) === normalized
+  );
+  const partialMatches = candidates.filter(
+    (source: any) =>
+      normalizeSourceName(source.displayName).includes(normalized) ||
+      normalized.includes(normalizeSourceName(source.displayName))
+  );
+
+  const ordered = [...exactMatches, ...partialMatches, ...candidates].sort((a: any, b: any) => {
+    const aPreferred = preferredTypes.has(a.type) ? 1 : 0;
+    const bPreferred = preferredTypes.has(b.type) ? 1 : 0;
+    if (aPreferred !== bPreferred) return bPreferred - aPreferred;
+    return b.worksCount - a.worksCount;
+  });
+
+  const dedupedIds: string[] = [];
+  const seen = new Set<string>();
+  for (const source of ordered) {
+    const sourceId = source.id as string;
+    if (!seen.has(sourceId)) {
+      seen.add(sourceId);
+      dedupedIds.push(sourceId);
+    }
+    if (dedupedIds.length >= perPage) break;
+  }
+
+  SOURCE_NAME_RESOLUTION_CACHE.set(normalized, dedupedIds);
+  return dedupedIds;
+}
+
+async function applySourceNameFilter(
+  filter: FilterOptions,
+  sourceName?: string,
+  maxIds = 5
+): Promise<string[]> {
+  if (!sourceName) return [];
+
+  const sourceIds = await resolveSourceIdsByName(sourceName, maxIds);
+  if (sourceIds.length > 0) {
+    filter['locations.source.id'] = sourceIds.join('|');
+  }
+  return sourceIds;
+}
+
 // Helper function to build filter object
-function buildFilter(params: any): FilterOptions {
+async function buildFilter(params: any): Promise<FilterOptions> {
   const filter: FilterOptions = {};
 
   // Handle publication year range
@@ -1525,14 +1599,12 @@ function buildFilter(params: any): FilterOptions {
   }
   // Venue/source filters (critical for top-journal paper writing)
   if (params.source_id) {
-    filter['primary_location.source.id'] = params.source_id;
+    filter['locations.source.id'] = params.source_id;
   }
-  if (params.source_name) {
-    filter['primary_location.source.display_name.search'] = params.source_name;
-  }
+  await applySourceNameFilter(filter, params.source_name);
   // ISSN filter for precise venue identification
   if (params.source_issn) {
-    filter['primary_location.source.issn'] = params.source_issn;
+    filter['locations.source.issn'] = params.source_issn;
   }
   // Minimum citations shorthand
   if (params.min_citations !== undefined && params.min_citations > 0) {
@@ -1565,7 +1637,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       case 'search_works': {
         const { searchWorksSchema } = await import('./validation.js');
         const validated = validateInput(searchWorksSchema, params, 'search_works');
-        const filter = buildFilter(validated);
+        const filter = await buildFilter(validated);
         const options: SearchOptions = {
           search: validated.query,
           filter,
@@ -1626,11 +1698,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_by_topic': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         const options: SearchOptions = {
           search: params.topic,
           filter,
-          sort: params.sort || 'relevance_score',
+          sort: params.sort || 'relevance_score:desc',
           perPage: params.per_page || DEFAULT_PAGE_SIZE,
         };
         const results = await openAlexClient.getWorks(options);
@@ -1737,7 +1809,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'get_top_cited_works': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         // Add default minimum citation threshold for influential papers
         const minCitations = params.min_citations !== undefined ? params.min_citations : 50;
         if (minCitations > 0) {
@@ -1762,7 +1834,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_authors': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         const options: SearchOptions = {
           search: params.query,
           filter,
@@ -1870,7 +1942,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_institutions': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         const options: SearchOptions = {
           search: params.query,
           filter,
@@ -1888,7 +1960,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'analyze_topic_trends': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         const options: SearchOptions = {
           search: params.query,
           filter,
@@ -1909,7 +1981,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const comparisons = [];
 
         for (const topic of params.topics) {
-          const filter = buildFilter(params);
+          const filter = await buildFilter(params);
           const options: SearchOptions = {
             search: topic,
             filter,
@@ -1960,7 +2032,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'analyze_geographic_distribution': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         const options: SearchOptions = {
           search: params.query,
           filter,
@@ -1990,7 +2062,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case 'search_sources': {
-        const filter = buildFilter(params);
+        const filter = await buildFilter(params);
         const options: SearchOptions = {
           search: params.query,
           filter,
@@ -2073,14 +2145,26 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
 
         const filter: FilterOptions = {};
+        const unresolvedPresetSourceNames: string[] = [];
+        const resolvedPresetSourceIds: string[] = [];
 
         // ── Venue filter ──────────────────────────────────────────────────
         if (preset.issns && preset.issns.length > 0) {
           // Journals: filter by ISSN (reliable, exact match with OR)
-          filter['primary_location.source.issn'] = preset.issns.join('|');
+          filter['locations.source.issn'] = preset.issns.join('|');
         } else if (preset.source_names && preset.source_names.length > 0) {
-          // Conferences: filter by display_name (OR across full names)
-          filter['primary_location.source.display_name'] = preset.source_names.join('|');
+          // Conferences: resolve display names to source IDs then filter on locations.
+          for (const sourceName of preset.source_names) {
+            const sourceIds = await resolveSourceIdsByName(sourceName, 1);
+            if (sourceIds.length > 0) {
+              resolvedPresetSourceIds.push(sourceIds[0]);
+            } else {
+              unresolvedPresetSourceNames.push(sourceName);
+            }
+          }
+          if (resolvedPresetSourceIds.length > 0) {
+            filter['locations.source.id'] = Array.from(new Set(resolvedPresetSourceIds)).join('|');
+          }
         }
 
         // ── Institution filter ────────────────────────────────────────────
@@ -2125,6 +2209,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
               institution_filter: params.institution_group
                 ? INSTITUTION_GROUPS[params.institution_group]?.name
                 : (params.author_institution ?? null),
+              resolved_source_ids: resolvedPresetSourceIds.length > 0
+                ? Array.from(new Set(resolvedPresetSourceIds))
+                : null,
+              unresolved_source_names: unresolvedPresetSourceNames.length > 0
+                ? unresolvedPresetSourceNames
+                : null,
               ...summary,
             }, null, 2),
           }],
@@ -2135,14 +2225,27 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'search_works_in_venue': {
         const filter: FilterOptions = {};
+        const unresolvedVenueName = params.venue_name || null;
 
         // Venue identification (in priority order: ID > ISSN > name)
         if (params.venue_id) {
-          filter['primary_location.source.id'] = params.venue_id;
+          filter['locations.source.id'] = params.venue_id;
         } else if (params.venue_issn) {
-          filter['primary_location.source.issn'] = params.venue_issn;
+          filter['locations.source.issn'] = params.venue_issn;
         } else if (params.venue_name) {
-          filter['primary_location.source.display_name.search'] = params.venue_name;
+          const sourceIds = await resolveSourceIdsByName(params.venue_name, 5);
+          if (sourceIds.length === 0) {
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  error: `No OpenAlex source IDs resolved for venue_name: "${params.venue_name}"`,
+                  tip: 'Try venue_id for exact matching or check venue name with search_sources.',
+                }, null, 2),
+              }],
+            };
+          }
+          filter['locations.source.id'] = sourceIds.join('|');
         }
 
         // Year range
@@ -2167,7 +2270,13 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         const results = await openAlexClient.getWorks(options);
         const summary = summarizeWorksList(results);
         return {
-          content: [{ type: 'text', text: JSON.stringify(summary, null, 2) }],
+          content: [{
+            type: 'text',
+            text: JSON.stringify({
+              ...summary,
+              venue_name_input: unresolvedVenueName,
+            }, null, 2)
+          }],
         };
       }
 
@@ -2301,9 +2410,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'find_review_articles': {
         const filter: FilterOptions = { 'type': 'review' };
-        if (params.source_name) {
-          filter['primary_location.source.display_name.search'] = params.source_name;
-        }
+        await applySourceNameFilter(filter, params.source_name);
         if (params.from_year && params.to_year) {
           filter['publication_year'] = `${params.from_year}-${params.to_year}`;
         } else if (params.from_year) {
@@ -2335,9 +2442,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           'publication_year': `<${publishedBefore + 1}`,
         };
         if (minCit > 0) filter['cited_by_count'] = `>${minCit - 1}`;
-        if (params.source_name) {
-          filter['primary_location.source.display_name.search'] = params.source_name;
-        }
+        await applySourceNameFilter(filter, params.source_name);
 
         const options: SearchOptions = {
           search: params.query,
@@ -2378,9 +2483,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
       case 'find_open_access_version': {
         const filter: FilterOptions = { 'is_oa': true };
-        if (params.source_name) {
-          filter['primary_location.source.display_name.search'] = params.source_name;
-        }
+        await applySourceNameFilter(filter, params.source_name);
         if (params.from_year) filter['publication_year'] = `>${params.from_year - 1}`;
         if (params.min_citations !== undefined && params.min_citations > 0) {
           filter['cited_by_count'] = `>${params.min_citations - 1}`;

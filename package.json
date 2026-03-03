@@ -19,6 +19,7 @@
     "dev": "tsc && node build/index.js",
     "watch": "tsc --watch",
     "test": "echo 'Tests skipped for now - vitest dependency issue'",
+    "test:regression": "node tests/regression.filters.js",
     "test:integration": "node tests/integration.test.js",
     "prepublishOnly": "npm run build"
   },
@@ -40,12 +41,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/oksure/openalex-research-mcp.git"
+    "url": "git+https://github.com/MohammadErfan-Jabbari/openalex-research-mcp.git"
   },
   "bugs": {
-    "url": "https://github.com/oksure/openalex-research-mcp/issues"
+    "url": "https://github.com/MohammadErfan-Jabbari/openalex-research-mcp/issues"
   },
-  "homepage": "https://github.com/oksure/openalex-research-mcp#readme",
+  "homepage": "https://github.com/MohammadErfan-Jabbari/openalex-research-mcp#readme",
   "engines": {
     "node": ">=18.0.0"
   },
