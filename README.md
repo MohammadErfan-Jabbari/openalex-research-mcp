@@ -11,6 +11,20 @@ A Model Context Protocol (MCP) server that provides access to OpenAlex, a compre
 - 🎓 **Curated journal presets** — UTD24, FT50, AJG/ABS tiers, top AI conferences, and more
 - 🏛️ **Institution group presets** — Ivy League, Top US, INSEAD+London, and more
 
+## Maintained Fork Policy
+
+This repository is an actively maintained fork with explicit upstream tracking.
+
+- Upstream: `https://github.com/oksure/openalex-research-mcp`
+- Maintained origin: `https://github.com/MohammadErfan-Jabbari/openalex-research-mcp`
+
+Maintenance expectations:
+
+- Keep `upstream` remote connected and sync regularly.
+- Patch in `src/` (TypeScript), then rebuild before release.
+- Run regression checks for OpenAlex query-contract changes:
+  - `npm run test:regression`
+
 ## Features
 
 Access 240+ million scholarly works through 31 specialized tools:
